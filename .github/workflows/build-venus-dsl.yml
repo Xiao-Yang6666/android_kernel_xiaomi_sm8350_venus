@@ -104,6 +104,23 @@ jobs:
           echo "=== KSU 版本相关(Makefile) ==="
           grep -nE 'KSU_VERSION|version|VERSION' KernelSU/kernel/Makefile 2>/dev/null | head
 
+          echo "=== 5.4 兼容补丁: task_work_add 第三参 ==="
+          # 5.8 才把 task_work_add 第三参从 bool 改成枚举 TWA_RESUME/TWA_SIGNAL。
+          # 5.4 没有 TWA_RESUME 标识符, 这里应传 true。直接改源文件(我们确定编 5.4)。
+          KSUK=KernelSU/kernel
+          if grep -rn 'TWA_RESUME' "$KSUK" >/dev/null 2>&1; then
+            grep -rln 'TWA_RESUME' "$KSUK" | while read -r f; do
+              sed -i 's/\bTWA_RESUME\b/true/g' "$f"
+              echo "  patched TWA_RESUME->true in $f"
+            done
+          else
+            echo "  (无 TWA_RESUME, 跳过)"
+          fi
+          # 校验改干净了
+          if grep -rn 'TWA_RESUME' "$KSUK" >/dev/null 2>&1; then
+            echo "WARN: 仍有 TWA_RESUME 残留"; grep -rn 'TWA_RESUME' "$KSUK"
+          fi
+
       - name: Download Android Clang toolchain (r416183b)
         run: |
           set -e
