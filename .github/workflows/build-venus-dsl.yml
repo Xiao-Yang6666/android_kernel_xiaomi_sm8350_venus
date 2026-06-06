@@ -75,13 +75,15 @@ jobs:
           grep -n 'kernelsu/Kconfig' drivers/Kconfig || true
           ls -la drivers/kernelsu || true   # 符号链接 -> ../KernelSU/kernel
 
-          echo "=== 移除旧 ReSukiSU 子模块目录, 换成 SukiSU-Ultra ==="
+          echo "=== 重新拉取 hushangda/ReSukiSU 并固定到 4 字头 tag ==="
           git submodule deinit -f KernelSU 2>/dev/null || true
           rm -rf KernelSU .git/modules/KernelSU
-          git clone https://github.com/SukiSU-Ultra/SukiSU-Ultra KernelSU
+          # ReSukiSU 是 SukiSU-Ultra 的 fork(改得更稳定/更好编译, 且作者用它适配过 venus 5.4),
+          # 支持任意管理器。fork锁定的 fc804b6(main旧点)驱动是3字头(30701), 与4字头管理器不匹配。
+          # 它自己有 v4.0.0 tag: 4字头(配本地管理器) 且不含 pgtable.h/TWA_RESUME(兼容5.4)。
+          # 不用上游 SukiSU-Ultra(其 v4.0.0 含 TWA_RESUME 要手动补丁, ReSukiSU v4.0.0 不用)。
+          git clone https://github.com/hushangda/ReSukiSU KernelSU
           cd KernelSU
-          # 注: 最新 tag(v4.1.x) 的 sucompat.c 含 <linux/pgtable.h>(5.8才有),
-          # 在 5.4 venus 树上编不过。v4.0.0 是仍为4字头(配4字头管理器) 且兼容5.4 的最后一版。
           KSU_TAG=v4.0.0
           echo "checkout 固定 tag: $KSU_TAG"
           git checkout "$KSU_TAG"
