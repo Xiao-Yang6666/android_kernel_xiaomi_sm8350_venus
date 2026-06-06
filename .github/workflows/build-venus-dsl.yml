@@ -1,0 +1,214 @@
+name: Build Venus DSL Kernel (5.4.302)
+
+# 第二阶段：原样复现 hushangda 的 DSL venus 内核（带 KSU/SuSFS/KPM）
+# 不加 Docker，纯复现，验证自编内核也能开机。
+# 第三阶段再加 Docker 配置。
+
+on:
+  workflow_dispatch:
+    inputs:
+      ENABLE_DOCKER:
+        description: '是否注入 Docker 配置（第二阶段填 false，第三阶段填 true）'
+        required: true
+        default: 'false'
+
+env:
+  ARCH: arm64
+  CLANG_VERSION: clang-r416183b
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Free up disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
+          sudo docker image prune --all --force || true
+          df -h
+
+      - name: Set up build environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git make bc bison flex libssl-dev libelf-dev \
+            build-essential ca-certificates curl python3 \
+            zip unzip lz4 cpio kmod
+
+      - name: Checkout kernel source (with submodules)
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+          path: android-kernel
+
+      - name: Show source info
+        run: |
+          cd android-kernel
+          echo "=== kernel version (Makefile) ==="
+          grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION)' Makefile | head -4
+          echo "=== KernelSU submodule ==="
+          ls -la KernelSU || echo "KernelSU dir missing!"
+          echo "=== venus_defconfig localversion ==="
+          head -1 arch/arm64/configs/venus_defconfig
+
+      - name: Download Android Clang toolchain (r416183b)
+        run: |
+          set -e
+          CLANG_VER=clang-r416183b
+          got=""
+
+          # ---- 方式1: googlesource +archive (Actions 网络通常可达) ----
+          echo "=== try1: googlesource archive ==="
+          if curl -fL --retry 3 --connect-timeout 30 -o clang.tar.gz \
+               "https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/main/${CLANG_VER}.tar.gz"; then
+            if tar tzf clang.tar.gz >/dev/null 2>&1; then
+              mkdir -p clang && tar xzf clang.tar.gz -C clang && got=1
+              echo "got clang via googlesource archive"
+            fi
+          fi
+
+          # ---- 方式2: git sparse-checkout 只拉 r416183b 子目录 ----
+          if [ -z "$got" ]; then
+            echo "=== try2: git sparse-checkout ==="
+            rm -rf clang_repo
+            git clone --depth=1 --filter=blob:none --sparse \
+              https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86 clang_repo
+            cd clang_repo
+            git sparse-checkout set "${CLANG_VER}"
+            cd ..
+            if [ -d "clang_repo/${CLANG_VER}/bin" ]; then
+              mv "clang_repo/${CLANG_VER}" clang && got=1
+              echo "got clang via git sparse-checkout"
+            fi
+          fi
+
+          # ---- 方式3: ZyCromerZ 镜像（最新ZyC clang，作为兜底；版本不同但能编5.4）----
+          if [ -z "$got" ]; then
+            echo "=== try3: ZyCromerZ ZyC clang fallback ==="
+            ZURL=$(curl -fsSL "https://raw.githubusercontent.com/ZyCromerZ/Clang/main/Clang-main-link.txt" | tail -1)
+            echo "ZyC url: $ZURL"
+            mkdir -p clang
+            curl -fL --retry 3 -o zyc.tar.gz "$ZURL"
+            tar xzf zyc.tar.gz -C clang
+            got=1
+          fi
+
+          if [ -z "$got" ]; then echo "ALL clang download methods failed"; exit 1; fi
+          echo "=== clang version ==="
+          ./clang/bin/clang --version | head -2
+
+      - name: (Optional) Inject Docker configs into venus_defconfig
+        if: ${{ github.event.inputs.ENABLE_DOCKER == 'true' }}
+        run: |
+          cd android-kernel
+          DEFCONFIG=arch/arm64/configs/venus_defconfig
+          echo "=== injecting Docker-required configs ==="
+          # 先删掉已有的（避免 is-not-set 行与新行冲突），再追加 =y
+          for opt in PID_NS USER_NS IPC_NS POSIX_MQUEUE \
+                     CGROUP_DEVICE CGROUP_PIDS \
+                     BRIDGE_NETFILTER VLAN_8021Q \
+                     NETFILTER_XT_MATCH_ADDRTYPE \
+                     CHECKPOINT_RESTORE \
+                     NETFILTER_XT_MATCH_IPVS \
+                     IP_VS IP_VS_NFCT IP_VS_PROTO_TCP IP_VS_PROTO_UDP \
+                     IP_VS_RR; do
+            sed -i "/^# CONFIG_${opt} is not set/d" "$DEFCONFIG"
+            sed -i "/^CONFIG_${opt}=/d" "$DEFCONFIG"
+            echo "CONFIG_${opt}=y" >> "$DEFCONFIG"
+          done
+          echo "=== docker-related lines now ==="
+          grep -E 'PID_NS|USER_NS|CGROUP_DEVICE|CGROUP_PIDS|BRIDGE_NETFILTER|VLAN_8021Q|ADDRTYPE|POSIX_MQUEUE|CHECKPOINT' "$DEFCONFIG" || true
+
+      - name: Build kernel (replicate build_venus.sh)
+        run: |
+          cd android-kernel
+          export PATH="$(pwd)/../clang/bin:$PATH"
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export LLVM=1
+          export LLVM_IAS=1
+          export CC=clang
+          export LD=ld.lld
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export OBJCOPY=llvm-objcopy
+          export OBJDUMP=llvm-objdump
+          export STRIP=llvm-strip
+          export READELF=llvm-readelf
+          unset KSU_MANAGER_PACKAGE
+
+          OUT=out
+          mkdir -p "$OUT"
+
+          MAKE_ARGS="O=$OUT ARCH=arm64 SUBARCH=arm64 LLVM=1 LLVM_IAS=1 CC=clang LD=ld.lld AR=llvm-ar NM=llvm-nm OBJCOPY=llvm-objcopy OBJDUMP=llvm-objdump STRIP=llvm-strip READELF=llvm-readelf"
+
+          echo "=== make venus_defconfig ==="
+          make $MAKE_ARGS venus_defconfig
+
+          echo "=== inject ZRAM/F2FS/KSU/SuSFS/KPM via scripts/config (same as build_venus.sh) ==="
+          ./scripts/config --file "$OUT/.config" \
+            --enable ZRAM \
+            --enable CRYPTO_LZ4 \
+            --enable ZRAM_DEF_COMP_LZ4 \
+            --disable ZRAM_DEF_COMP_LZORLE \
+            --disable ZRAM_DEF_COMP_LZO \
+            --disable ZRAM_DEF_COMP_ZSTD \
+            --disable ZRAM_DEF_COMP_LZ4HC \
+            --disable ZRAM_DEF_COMP_842 \
+            --enable F2FS_FS_COMPRESSION \
+            --enable F2FS_FS_LZO \
+            --enable F2FS_FS_LZORLE \
+            --enable F2FS_FS_LZ4 \
+            --enable F2FS_FS_LZ4HC \
+            --enable F2FS_FS_ZSTD \
+            --enable F2FS_UNFAIR_RWSEM \
+            --enable F2FS_CP_OPT \
+            --enable KSU \
+            --set-str KSU_FULL_NAME_FORMAT "%TAG_NAME%-%COMMIT_SHA%@%REPO_NAME%" \
+            --enable KSU_MULTI_MANAGER_SUPPORT \
+            --enable KSU_DISABLE_IN_RECOVERY \
+            --disable KSU_TRACEPOINT_HOOK \
+            --disable KSU_MANUAL_HOOK \
+            --enable KSU_SUSFS \
+            --enable KSU_SUSFS_SUS_PATH \
+            --enable KSU_SUSFS_SUS_MOUNT \
+            --enable KSU_SUSFS_SUS_KSTAT \
+            --enable KSU_SUSFS_SPOOF_UNAME \
+            --enable KSU_SUSFS_ENABLE_LOG \
+            --enable KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+            --enable KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+            --enable KSU_SUSFS_OPEN_REDIRECT \
+            --enable KSU_SUSFS_SUS_MAP \
+            --enable KALLSYMS \
+            --enable KALLSYMS_ALL \
+            --enable BPF_STREAM_PARSER \
+            --enable KPM
+
+          echo "=== olddefconfig ==="
+          make $MAKE_ARGS olddefconfig
+
+          echo "=== build Image Image.gz dtbs ==="
+          make -j"$(nproc)" $MAKE_ARGS Image Image.gz dtbs
+
+          echo "=== built kernel version ==="
+          if [ -f "$OUT/arch/arm64/boot/Image.gz" ]; then
+            gzip -dc "$OUT/arch/arm64/boot/Image.gz" > /tmp/Image_check
+            grep -a -m1 -o "Linux version 5[^)]*)" /tmp/Image_check || true
+          fi
+          ls -la "$OUT/arch/arm64/boot/"
+
+      - name: Collect artifacts
+        run: |
+          cd android-kernel
+          mkdir -p ../artifacts
+          cp out/arch/arm64/boot/Image       ../artifacts/ 2>/dev/null || true
+          cp out/arch/arm64/boot/Image.gz    ../artifacts/ 2>/dev/null || true
+          cp out/arch/arm64/boot/dtb*        ../artifacts/ 2>/dev/null || true
+          echo "=== artifacts ==="
+          ls -la ../artifacts/
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: venus-dsl-kernel-${{ github.event.inputs.ENABLE_DOCKER == 'true' && 'docker' || 'plain' }}
+          path: artifacts/*
