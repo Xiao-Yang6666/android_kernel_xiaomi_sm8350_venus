@@ -15,6 +15,10 @@ on:
         description: '是否注入 KVM 硬件虚拟化配置（验证 888 能否跑 VM）'
         required: true
         default: 'false'
+      UPDATE_KSU:
+        description: '是否把KSU从旧ReSukiSU(30701)升级为SukiSU-Ultra上游(4字头,配新管理器)'
+        required: true
+        default: 'false'
 
 env:
   ARCH: arm64
@@ -54,6 +58,28 @@ jobs:
           ls -la KernelSU || echo "KernelSU dir missing!"
           echo "=== venus_defconfig localversion ==="
           head -1 arch/arm64/configs/venus_defconfig
+
+      - name: (Optional) Upgrade KSU to SukiSU-Ultra upstream
+        if: ${{ github.event.inputs.UPDATE_KSU == 'true' }}
+        run: |
+          set -e
+          cd android-kernel
+          echo "=== 移除旧的 ReSukiSU 子模块(30701),换成 SukiSU-Ultra 上游 ==="
+          # 旧的是 git submodule 形式,先彻底清掉,避免 setup.sh 与残留冲突
+          git submodule deinit -f KernelSU 2>/dev/null || true
+          rm -rf KernelSU .git/modules/KernelSU 2>/dev/null || true
+          # 用官方 setup.sh --cleanup 清掉 drivers/Makefile|Kconfig 里的旧 kernelsu 引用(无论旧的怎么集成的)
+          echo "=== 先 cleanup 旧的 drivers 引用 ==="
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s -- --cleanup || true
+          # SukiSU-Ultra 官方集成: setup.sh 不带参数 = checkout 最新tag(对应4字头稳定版)
+          # 注: 此脚本只装KSU本体, 不含SUSFS补丁(SUSFS仅用于隐藏root,与Docker/LXC无关,暂不集成)
+          echo "=== 运行 SukiSU-Ultra setup.sh (最新tag) ==="
+          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s
+          echo "=== 集成后 KernelSU 目录 + 当前tag ==="
+          ls -la KernelSU 2>/dev/null | head || echo "KernelSU dir missing after setup!"
+          ( cd KernelSU && git describe --tags 2>/dev/null && git log -1 --oneline 2>/dev/null ) || true
+          echo "=== drivers 集成情况(符号链接/Makefile/Kconfig) ==="
+          ls -la drivers/kernelsu 2>/dev/null; grep -n kernelsu drivers/Makefile 2>/dev/null; grep -n 'kernelsu/Kconfig' drivers/Kconfig 2>/dev/null
 
       - name: Download Android Clang toolchain (r416183b)
         run: |
