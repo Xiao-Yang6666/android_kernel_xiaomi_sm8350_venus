@@ -102,22 +102,19 @@ jobs:
         run: |
           cd android-kernel
           DEFCONFIG=arch/arm64/configs/venus_defconfig
-          echo "=== injecting Docker-required configs ==="
-          # 先删掉已有的（避免 is-not-set 行与新行冲突），再追加 =y
+          echo "=== injecting Docker-required configs (最小集) ==="
+          # stock/DSL内核实测缺失、docker硬性必需的项。先删旧行(避免 is-not-set 与新行冲突),再追加 =y
           for opt in PID_NS USER_NS IPC_NS POSIX_MQUEUE \
                      CGROUP_DEVICE CGROUP_PIDS \
                      BRIDGE_NETFILTER VLAN_8021Q \
                      NETFILTER_XT_MATCH_ADDRTYPE \
-                     CHECKPOINT_RESTORE \
-                     NETFILTER_XT_MATCH_IPVS \
-                     IP_VS IP_VS_NFCT IP_VS_PROTO_TCP IP_VS_PROTO_UDP \
-                     IP_VS_RR; do
+                     CHECKPOINT_RESTORE; do
             sed -i "/^# CONFIG_${opt} is not set/d" "$DEFCONFIG"
             sed -i "/^CONFIG_${opt}=/d" "$DEFCONFIG"
             echo "CONFIG_${opt}=y" >> "$DEFCONFIG"
           done
           echo "=== docker-related lines now ==="
-          grep -E 'PID_NS|USER_NS|CGROUP_DEVICE|CGROUP_PIDS|BRIDGE_NETFILTER|VLAN_8021Q|ADDRTYPE|POSIX_MQUEUE|CHECKPOINT' "$DEFCONFIG" || true
+          grep -E 'PID_NS|USER_NS|IPC_NS|CGROUP_DEVICE|CGROUP_PIDS|BRIDGE_NETFILTER|VLAN_8021Q|ADDRTYPE|POSIX_MQUEUE|CHECKPOINT' "$DEFCONFIG" || true
 
       - name: Build kernel (replicate build_venus.sh)
         run: |
@@ -186,6 +183,29 @@ jobs:
 
           echo "=== olddefconfig ==="
           make $MAKE_ARGS olddefconfig
+
+          # Docker模式: 校验那几项是否真的生效(没生效就早停,别白等编译)
+          if [ "${{ github.event.inputs.ENABLE_DOCKER }}" = "true" ]; then
+            echo "=== verify docker configs took effect in .config ==="
+            MISSING=""
+            for opt in PID_NS USER_NS IPC_NS POSIX_MQUEUE \
+                       CGROUP_DEVICE CGROUP_PIDS \
+                       BRIDGE_NETFILTER VLAN_8021Q \
+                       NETFILTER_XT_MATCH_ADDRTYPE CHECKPOINT_RESTORE; do
+              if grep -q "^CONFIG_${opt}=y" "$OUT/.config"; then
+                echo "  OK  CONFIG_${opt}=y"
+              elif grep -q "^CONFIG_${opt}=m" "$OUT/.config"; then
+                echo "  OK  CONFIG_${opt}=m (module)"
+              else
+                echo "  !!  CONFIG_${opt} NOT enabled"
+                MISSING="$MISSING $opt"
+              fi
+            done
+            if [ -n "$MISSING" ]; then
+              echo "ERROR: 这些docker配置没生效(可能缺依赖):$MISSING"
+              echo "继续编译但这些功能会缺失。检查依赖关系。"
+            fi
+          fi
 
           echo "=== build Image Image.gz dtbs ==="
           make -j"$(nproc)" $MAKE_ARGS Image Image.gz dtbs
