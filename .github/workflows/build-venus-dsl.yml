@@ -70,18 +70,37 @@ jobs:
         run: |
           set -e
           cd android-kernel
-          echo "=== 移除旧的 ReSukiSU 子模块(30701) ==="
+          echo "=== 源码树本来就有的 KSU 引用(不动它们) ==="
+          grep -n 'kernelsu' drivers/Makefile || true
+          grep -n 'kernelsu/Kconfig' drivers/Kconfig || true
+          ls -la drivers/kernelsu || true   # 符号链接 -> ../KernelSU/kernel
+
+          echo "=== 移除旧 ReSukiSU 子模块目录, 换成 SukiSU-Ultra ==="
           git submodule deinit -f KernelSU 2>/dev/null || true
-          rm -rf KernelSU .git/modules/KernelSU 2>/dev/null || true
-          echo "=== 先 cleanup 旧的 drivers/Makefile|Kconfig 里的 kernelsu 引用 ==="
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s -- --cleanup || true
-          echo "=== 集成 SukiSU-Ultra 最新tag(4字头) ==="
-          curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s
-          echo "=== 集成后 KernelSU 目录 + 当前tag ==="
-          ls -la KernelSU 2>/dev/null | head || echo "KernelSU dir missing after setup!"
-          ( cd KernelSU && git describe --tags 2>/dev/null && git log -1 --oneline 2>/dev/null ) || true
-          echo "=== drivers 集成情况 ==="
-          ls -la drivers/kernelsu 2>/dev/null; grep -n kernelsu drivers/Makefile 2>/dev/null; grep -n 'kernelsu/Kconfig' drivers/Kconfig 2>/dev/null
+          rm -rf KernelSU .git/modules/KernelSU
+          git clone https://github.com/SukiSU-Ultra/SukiSU-Ultra KernelSU
+          cd KernelSU
+          LATEST_TAG=$(git describe --abbrev=0 --tags)
+          echo "最新 tag: $LATEST_TAG"
+          git checkout "$LATEST_TAG"
+          git log -1 --oneline
+          cd ..
+
+          echo "=== 确保符号链接 drivers/kernelsu -> ../KernelSU/kernel 存在 ==="
+          if [ ! -e drivers/kernelsu/Kconfig ]; then
+            echo "符号链接不可达, 重建"
+            rm -f drivers/kernelsu
+            ln -s ../KernelSU/kernel drivers/kernelsu
+          fi
+
+          echo "=== 硬校验: KSU 代码必须就位, 否则早失败别白编 ==="
+          test -f drivers/kernelsu/Kconfig || { echo "FATAL: drivers/kernelsu/Kconfig 缺失"; exit 1; }
+          test -f drivers/kernelsu/Makefile || { echo "FATAL: drivers/kernelsu/Makefile 缺失"; exit 1; }
+          grep -q 'config KSU' drivers/kernelsu/Kconfig || { echo "FATAL: Kconfig 里无 KSU 符号"; exit 1; }
+          echo "OK: KSU 代码就位"
+          ls -la drivers/kernelsu/ | head
+          echo "=== KSU 版本相关(Makefile) ==="
+          grep -nE 'KSU_VERSION|version|VERSION' KernelSU/kernel/Makefile 2>/dev/null | head
 
       - name: Download Android Clang toolchain (r416183b)
         run: |
