@@ -11,6 +11,10 @@ on:
         description: '是否注入 Docker 配置（第二阶段填 false，第三阶段填 true）'
         required: true
         default: 'false'
+      ENABLE_KVM:
+        description: '是否注入 KVM 硬件虚拟化配置（验证 888 能否跑 VM）'
+        required: true
+        default: 'false'
 
 env:
   ARCH: arm64
@@ -116,6 +120,22 @@ jobs:
           echo "=== docker-related lines now ==="
           grep -E 'PID_NS|USER_NS|IPC_NS|CGROUP_DEVICE|CGROUP_PIDS|BRIDGE_NETFILTER|VLAN_8021Q|ADDRTYPE|POSIX_MQUEUE|CHECKPOINT' "$DEFCONFIG" || true
 
+      - name: (Optional) Inject KVM virtualization configs into venus_defconfig
+        if: ${{ github.event.inputs.ENABLE_KVM == 'true' }}
+        run: |
+          cd android-kernel
+          DEFCONFIG=arch/arm64/configs/venus_defconfig
+          echo "=== injecting ARM64 KVM configs ==="
+          # ARM64 硬件虚拟化:总开关 VIRTUALIZATION + KVM,外加 vhost(virtio加速)
+          for opt in VIRTUALIZATION KVM VHOST VHOST_NET VHOST_VSOCK \
+                     VSOCKETS VIRTIO_VSOCKETS; do
+            sed -i "/^# CONFIG_${opt} is not set/d" "$DEFCONFIG"
+            sed -i "/^CONFIG_${opt}=/d" "$DEFCONFIG"
+            echo "CONFIG_${opt}=y" >> "$DEFCONFIG"
+          done
+          echo "=== kvm-related lines now ==="
+          grep -E 'VIRTUALIZATION|KVM|VHOST|VSOCK' "$DEFCONFIG" || true
+
       - name: Build kernel (replicate build_venus.sh)
         run: |
           cd android-kernel
@@ -184,6 +204,28 @@ jobs:
           echo "=== olddefconfig ==="
           make $MAKE_ARGS olddefconfig
 
+          # KVM模式: 用 scripts/config 强制再开一遍(defconfig注入可能被 olddefconfig 依赖裁掉)
+          if [ "${{ github.event.inputs.ENABLE_KVM }}" = "true" ]; then
+            echo "=== force-enable KVM via scripts/config ==="
+            ./scripts/config --file "$OUT/.config" \
+              --enable VIRTUALIZATION \
+              --enable KVM \
+              --enable VHOST \
+              --enable VHOST_NET \
+              --enable VHOST_VSOCK \
+              --enable VSOCKETS \
+              --enable VIRTIO_VSOCKETS
+            make $MAKE_ARGS olddefconfig
+            echo "=== verify KVM configs took effect ==="
+            for opt in VIRTUALIZATION KVM HAVE_KVM ARM64_VHE VHOST VHOST_NET; do
+              if grep -q "^CONFIG_${opt}=[ym]" "$OUT/.config"; then
+                echo "  OK  $(grep "^CONFIG_${opt}=" "$OUT/.config")"
+              else
+                echo "  !!  CONFIG_${opt} NOT enabled"
+              fi
+            done
+          fi
+
           # Docker模式: 校验那几项是否真的生效(没生效就早停,别白等编译)
           if [ "${{ github.event.inputs.ENABLE_DOCKER }}" = "true" ]; then
             echo "=== verify docker configs took effect in .config ==="
@@ -230,5 +272,5 @@ jobs:
       - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: venus-dsl-kernel-${{ github.event.inputs.ENABLE_DOCKER == 'true' && 'docker' || 'plain' }}
+          name: venus-dsl-kernel-${{ github.event.inputs.ENABLE_DOCKER == 'true' && 'docker' || 'plain' }}${{ github.event.inputs.ENABLE_KVM == 'true' && '-kvm' || '' }}
           path: artifacts/*
