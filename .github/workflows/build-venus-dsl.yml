@@ -80,9 +80,11 @@ jobs:
           rm -rf KernelSU .git/modules/KernelSU
           git clone https://github.com/SukiSU-Ultra/SukiSU-Ultra KernelSU
           cd KernelSU
-          LATEST_TAG=$(git describe --abbrev=0 --tags)
-          echo "最新 tag: $LATEST_TAG"
-          git checkout "$LATEST_TAG"
+          # 注: 最新 tag(v4.1.x) 的 sucompat.c 含 <linux/pgtable.h>(5.8才有),
+          # 在 5.4 venus 树上编不过。v4.0.0 是仍为4字头(配4字头管理器) 且兼容5.4 的最后一版。
+          KSU_TAG=v4.0.0
+          echo "checkout 固定 tag: $KSU_TAG"
+          git checkout "$KSU_TAG"
           git log -1 --oneline
           cd ..
 
