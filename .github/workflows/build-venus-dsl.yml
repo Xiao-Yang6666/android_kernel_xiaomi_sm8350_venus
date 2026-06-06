@@ -3,7 +3,8 @@ name: Build Venus Kernel (XiaoYang docker sukisu-ultra)
 # 自建 venus 内核（基于 hushangda DSL 源码 5.4.302）。
 # 默认行为(无需任何参数)：
 #   1. 注入 Docker 所需内核配置
-#   2. 把 KSU 从旧 ReSukiSU(30701) 升级为 SukiSU-Ultra 上游最新tag(4字头)
+#   2. KSU 用 fork 自带的 ReSukiSU 子模块(fc804b6, 配套 build_venus.sh, 带SUSFS/多管理器,
+#      原生适配 venus 5.4)—— 不再换上游/不打补丁。多管理器模式靠APK签名匹配, 配任意SukiSU管理器。
 #   3. 内核名设为 -XiaoYang-docker-sukisu-ultra
 
 on:
@@ -65,63 +66,6 @@ jobs:
           sed -i "/^CONFIG_LOCALVERSION_AUTO=/d" "$DEFCONFIG"
           echo "# CONFIG_LOCALVERSION_AUTO is not set" >> "$DEFCONFIG"
           grep -E 'CONFIG_LOCALVERSION' "$DEFCONFIG"
-
-      - name: Upgrade KSU to SukiSU-Ultra upstream (latest tag)
-        run: |
-          set -e
-          cd android-kernel
-          echo "=== 源码树本来就有的 KSU 引用(不动它们) ==="
-          grep -n 'kernelsu' drivers/Makefile || true
-          grep -n 'kernelsu/Kconfig' drivers/Kconfig || true
-          ls -la drivers/kernelsu || true   # 符号链接 -> ../KernelSU/kernel
-
-          echo "=== 重新拉取 hushangda/ReSukiSU 并固定到 4 字头 tag ==="
-          git submodule deinit -f KernelSU 2>/dev/null || true
-          rm -rf KernelSU .git/modules/KernelSU
-          # ReSukiSU 是 SukiSU-Ultra 的 fork(改得更稳定/更好编译, 且作者用它适配过 venus 5.4),
-          # 支持任意管理器。fork锁定的 fc804b6(main旧点)驱动是3字头(30701), 与4字头管理器不匹配。
-          # 它自己有 v4.0.0 tag: 4字头(配本地管理器) 且不含 pgtable.h/TWA_RESUME(兼容5.4)。
-          # 不用上游 SukiSU-Ultra(其 v4.0.0 含 TWA_RESUME 要手动补丁, ReSukiSU v4.0.0 不用)。
-          git clone https://github.com/hushangda/ReSukiSU KernelSU
-          cd KernelSU
-          KSU_TAG=v4.0.0
-          echo "checkout 固定 tag: $KSU_TAG"
-          git checkout "$KSU_TAG"
-          git log -1 --oneline
-          cd ..
-
-          echo "=== 确保符号链接 drivers/kernelsu -> ../KernelSU/kernel 存在 ==="
-          if [ ! -e drivers/kernelsu/Kconfig ]; then
-            echo "符号链接不可达, 重建"
-            rm -f drivers/kernelsu
-            ln -s ../KernelSU/kernel drivers/kernelsu
-          fi
-
-          echo "=== 硬校验: KSU 代码必须就位, 否则早失败别白编 ==="
-          test -f drivers/kernelsu/Kconfig || { echo "FATAL: drivers/kernelsu/Kconfig 缺失"; exit 1; }
-          test -f drivers/kernelsu/Makefile || { echo "FATAL: drivers/kernelsu/Makefile 缺失"; exit 1; }
-          grep -q 'config KSU' drivers/kernelsu/Kconfig || { echo "FATAL: Kconfig 里无 KSU 符号"; exit 1; }
-          echo "OK: KSU 代码就位"
-          ls -la drivers/kernelsu/ | head
-          echo "=== KSU 版本相关(Makefile) ==="
-          grep -nE 'KSU_VERSION|version|VERSION' KernelSU/kernel/Makefile 2>/dev/null | head
-
-          echo "=== 5.4 兼容补丁: task_work_add 第三参 ==="
-          # 5.8 才把 task_work_add 第三参从 bool 改成枚举 TWA_RESUME/TWA_SIGNAL。
-          # 5.4 没有 TWA_RESUME 标识符, 这里应传 true。直接改源文件(我们确定编 5.4)。
-          KSUK=KernelSU/kernel
-          if grep -rn 'TWA_RESUME' "$KSUK" >/dev/null 2>&1; then
-            grep -rln 'TWA_RESUME' "$KSUK" | while read -r f; do
-              sed -i 's/\bTWA_RESUME\b/true/g' "$f"
-              echo "  patched TWA_RESUME->true in $f"
-            done
-          else
-            echo "  (无 TWA_RESUME, 跳过)"
-          fi
-          # 校验改干净了
-          if grep -rn 'TWA_RESUME' "$KSUK" >/dev/null 2>&1; then
-            echo "WARN: 仍有 TWA_RESUME 残留"; grep -rn 'TWA_RESUME' "$KSUK"
-          fi
 
       - name: Download Android Clang toolchain (r416183b)
         run: |
@@ -231,9 +175,22 @@ jobs:
             --enable F2FS_FS_ZSTD \
             --enable F2FS_UNFAIR_RWSEM \
             --enable F2FS_CP_OPT \
-            --enable MODULES \
-            --enable KPROBES \
             --enable KSU \
+            --set-str KSU_FULL_NAME_FORMAT "%TAG_NAME%-%COMMIT_SHA%@%REPO_NAME%" \
+            --enable KSU_MULTI_MANAGER_SUPPORT \
+            --enable KSU_DISABLE_IN_RECOVERY \
+            --disable KSU_TRACEPOINT_HOOK \
+            --disable KSU_MANUAL_HOOK \
+            --enable KSU_SUSFS \
+            --enable KSU_SUSFS_SUS_PATH \
+            --enable KSU_SUSFS_SUS_MOUNT \
+            --enable KSU_SUSFS_SUS_KSTAT \
+            --enable KSU_SUSFS_SPOOF_UNAME \
+            --enable KSU_SUSFS_ENABLE_LOG \
+            --enable KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
+            --enable KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
+            --enable KSU_SUSFS_OPEN_REDIRECT \
+            --enable KSU_SUSFS_SUS_MAP \
             --enable KALLSYMS \
             --enable KALLSYMS_ALL \
             --enable BPF_STREAM_PARSER \
@@ -261,13 +218,13 @@ jobs:
             echo "WARN: 这些docker配置没生效(可能缺依赖):$MISSING"
           fi
 
-          echo "=== verify KSU enabled (依赖链 KSU->KPROBES->MODULES, 及 EXT4_FS) ==="
-          for opt in MODULES KPROBES EXT4_FS KSU; do
+          echo "=== verify KSU/SUSFS enabled (作者 build_venus.sh 同款) ==="
+          for opt in KSU KSU_MULTI_MANAGER_SUPPORT KSU_SUSFS KPM; do
             line=$(grep -E "^CONFIG_${opt}=" "$OUT/.config" || true)
             if [ -n "$line" ]; then echo "  OK  $line"; else echo "  !!  CONFIG_${opt} NOT set"; fi
           done
           if ! grep -qE '^CONFIG_KSU=[ym]' "$OUT/.config"; then
-            echo "FATAL: CONFIG_KSU 没开成 —— KSU 不会编进内核(检查 KPROBES/MODULES 依赖)"; exit 1
+            echo "FATAL: CONFIG_KSU 没开成"; exit 1
           fi
 
           echo "=== build Image Image.gz dtbs ==="
