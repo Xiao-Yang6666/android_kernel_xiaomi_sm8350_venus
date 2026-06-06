@@ -210,6 +210,7 @@ jobs:
             --enable F2FS_FS_ZSTD \
             --enable F2FS_UNFAIR_RWSEM \
             --enable F2FS_CP_OPT \
+            --enable KPROBES \
             --enable KSU \
             --enable KALLSYMS \
             --enable KALLSYMS_ALL \
@@ -238,8 +239,14 @@ jobs:
             echo "WARN: 这些docker配置没生效(可能缺依赖):$MISSING"
           fi
 
-          echo "=== verify KSU enabled ==="
-          grep -E '^CONFIG_KSU=' "$OUT/.config" || echo "  !! CONFIG_KSU not set"
+          echo "=== verify KSU enabled (依赖 KPROBES && EXT4_FS) ==="
+          for opt in KPROBES EXT4_FS KSU; do
+            line=$(grep -E "^CONFIG_${opt}=" "$OUT/.config" || true)
+            if [ -n "$line" ]; then echo "  OK  $line"; else echo "  !!  CONFIG_${opt} NOT set"; fi
+          done
+          if ! grep -qE '^CONFIG_KSU=[ym]' "$OUT/.config"; then
+            echo "FATAL: CONFIG_KSU 没开成 —— KSU 不会编进内核(检查 KPROBES 依赖)"; exit 1
+          fi
 
           echo "=== build Image Image.gz dtbs ==="
           make -j"$(nproc)" $MAKE_ARGS Image Image.gz dtbs
