@@ -1,24 +1,17 @@
-name: Build Venus DSL Kernel (5.4.302)
+name: Build Venus Kernel (XiaoYang docker sukisu-ultra)
 
-# 第二阶段：原样复现 hushangda 的 DSL venus 内核（带 KSU/SuSFS/KPM）
-# 不加 Docker，纯复现，验证自编内核也能开机。
-# 第三阶段再加 Docker 配置。
+# 自建 venus 内核（基于 hushangda DSL 源码 5.4.302）。
+# 默认行为(无需任何参数)：
+#   1. 注入 Docker 所需内核配置
+#   2. 把 KSU 从旧 ReSukiSU(30701) 升级为 SukiSU-Ultra 上游最新tag(4字头)
+#   3. 内核名设为 -XiaoYang-docker-sukisu-ultra
 
 on:
-  workflow_dispatch:
-    inputs:
-      ENABLE_DOCKER:
-        description: '是否注入 Docker 配置（第二阶段填 false，第三阶段填 true）'
-        required: true
-        default: 'false'
-      ENABLE_KVM:
-        description: '是否注入 KVM 硬件虚拟化配置（验证 888 能否跑 VM）'
-        required: true
-        default: 'false'
-      UPDATE_KSU:
-        description: '是否把KSU从旧ReSukiSU(30701)升级为SukiSU-Ultra上游(4字头,配新管理器)'
-        required: true
-        default: 'false'
+  workflow_dispatch: {}
+  push:
+    branches: [ main ]
+    paths:
+      - '.github/workflows/build-venus-dsl.yml'
 
 env:
   ARCH: arm64
@@ -54,31 +47,40 @@ jobs:
           cd android-kernel
           echo "=== kernel version (Makefile) ==="
           grep -E '^(VERSION|PATCHLEVEL|SUBLEVEL|EXTRAVERSION)' Makefile | head -4
-          echo "=== KernelSU submodule ==="
+          echo "=== KernelSU submodule (旧) ==="
           ls -la KernelSU || echo "KernelSU dir missing!"
           echo "=== venus_defconfig localversion ==="
           head -1 arch/arm64/configs/venus_defconfig
 
-      - name: (Optional) Upgrade KSU to SukiSU-Ultra upstream
-        if: ${{ github.event.inputs.UPDATE_KSU == 'true' }}
+      - name: Set kernel name (localversion)
         run: |
           set -e
           cd android-kernel
-          echo "=== 移除旧的 ReSukiSU 子模块(30701),换成 SukiSU-Ultra 上游 ==="
-          # 旧的是 git submodule 形式,先彻底清掉,避免 setup.sh 与残留冲突
+          DEFCONFIG=arch/arm64/configs/venus_defconfig
+          NAME="-XiaoYang-docker-sukisu-ultra"
+          echo "=== 改内核名 LOCALVERSION -> ${NAME} ==="
+          sed -i "/^CONFIG_LOCALVERSION=/d" "$DEFCONFIG"
+          echo "CONFIG_LOCALVERSION=\"${NAME}\"" >> "$DEFCONFIG"
+          # 关掉 auto 后缀(+),避免 -dirty/+ 之类污染版本名;hash 由 git 提供
+          sed -i "/^CONFIG_LOCALVERSION_AUTO=/d" "$DEFCONFIG"
+          echo "# CONFIG_LOCALVERSION_AUTO is not set" >> "$DEFCONFIG"
+          grep -E 'CONFIG_LOCALVERSION' "$DEFCONFIG"
+
+      - name: Upgrade KSU to SukiSU-Ultra upstream (latest tag)
+        run: |
+          set -e
+          cd android-kernel
+          echo "=== 移除旧的 ReSukiSU 子模块(30701) ==="
           git submodule deinit -f KernelSU 2>/dev/null || true
           rm -rf KernelSU .git/modules/KernelSU 2>/dev/null || true
-          # 用官方 setup.sh --cleanup 清掉 drivers/Makefile|Kconfig 里的旧 kernelsu 引用(无论旧的怎么集成的)
-          echo "=== 先 cleanup 旧的 drivers 引用 ==="
+          echo "=== 先 cleanup 旧的 drivers/Makefile|Kconfig 里的 kernelsu 引用 ==="
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s -- --cleanup || true
-          # SukiSU-Ultra 官方集成: setup.sh 不带参数 = checkout 最新tag(对应4字头稳定版)
-          # 注: 此脚本只装KSU本体, 不含SUSFS补丁(SUSFS仅用于隐藏root,与Docker/LXC无关,暂不集成)
-          echo "=== 运行 SukiSU-Ultra setup.sh (最新tag) ==="
+          echo "=== 集成 SukiSU-Ultra 最新tag(4字头) ==="
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s
           echo "=== 集成后 KernelSU 目录 + 当前tag ==="
           ls -la KernelSU 2>/dev/null | head || echo "KernelSU dir missing after setup!"
           ( cd KernelSU && git describe --tags 2>/dev/null && git log -1 --oneline 2>/dev/null ) || true
-          echo "=== drivers 集成情况(符号链接/Makefile/Kconfig) ==="
+          echo "=== drivers 集成情况 ==="
           ls -la drivers/kernelsu 2>/dev/null; grep -n kernelsu drivers/Makefile 2>/dev/null; grep -n 'kernelsu/Kconfig' drivers/Kconfig 2>/dev/null
 
       - name: Download Android Clang toolchain (r416183b)
@@ -127,13 +129,12 @@ jobs:
           echo "=== clang version ==="
           ./clang/bin/clang --version | head -2
 
-      - name: (Optional) Inject Docker configs into venus_defconfig
-        if: ${{ github.event.inputs.ENABLE_DOCKER == 'true' }}
+      - name: Inject Docker-required configs into venus_defconfig
         run: |
+          set -e
           cd android-kernel
           DEFCONFIG=arch/arm64/configs/venus_defconfig
           echo "=== injecting Docker-required configs (最小集) ==="
-          # stock/DSL内核实测缺失、docker硬性必需的项。先删旧行(避免 is-not-set 与新行冲突),再追加 =y
           for opt in PID_NS USER_NS IPC_NS POSIX_MQUEUE \
                      CGROUP_DEVICE CGROUP_PIDS \
                      BRIDGE_NETFILTER VLAN_8021Q \
@@ -145,22 +146,6 @@ jobs:
           done
           echo "=== docker-related lines now ==="
           grep -E 'PID_NS|USER_NS|IPC_NS|CGROUP_DEVICE|CGROUP_PIDS|BRIDGE_NETFILTER|VLAN_8021Q|ADDRTYPE|POSIX_MQUEUE|CHECKPOINT' "$DEFCONFIG" || true
-
-      - name: (Optional) Inject KVM virtualization configs into venus_defconfig
-        if: ${{ github.event.inputs.ENABLE_KVM == 'true' }}
-        run: |
-          cd android-kernel
-          DEFCONFIG=arch/arm64/configs/venus_defconfig
-          echo "=== injecting ARM64 KVM configs ==="
-          # ARM64 硬件虚拟化:总开关 VIRTUALIZATION + KVM,外加 vhost(virtio加速)
-          for opt in VIRTUALIZATION KVM VHOST VHOST_NET VHOST_VSOCK \
-                     VSOCKETS VIRTIO_VSOCKETS; do
-            sed -i "/^# CONFIG_${opt} is not set/d" "$DEFCONFIG"
-            sed -i "/^CONFIG_${opt}=/d" "$DEFCONFIG"
-            echo "CONFIG_${opt}=y" >> "$DEFCONFIG"
-          done
-          echo "=== kvm-related lines now ==="
-          grep -E 'VIRTUALIZATION|KVM|VHOST|VSOCK' "$DEFCONFIG" || true
 
       - name: Build kernel (replicate build_venus.sh)
         run: |
@@ -207,21 +192,6 @@ jobs:
             --enable F2FS_UNFAIR_RWSEM \
             --enable F2FS_CP_OPT \
             --enable KSU \
-            --set-str KSU_FULL_NAME_FORMAT "%TAG_NAME%-%COMMIT_SHA%@%REPO_NAME%" \
-            --enable KSU_MULTI_MANAGER_SUPPORT \
-            --enable KSU_DISABLE_IN_RECOVERY \
-            --disable KSU_TRACEPOINT_HOOK \
-            --disable KSU_MANUAL_HOOK \
-            --enable KSU_SUSFS \
-            --enable KSU_SUSFS_SUS_PATH \
-            --enable KSU_SUSFS_SUS_MOUNT \
-            --enable KSU_SUSFS_SUS_KSTAT \
-            --enable KSU_SUSFS_SPOOF_UNAME \
-            --enable KSU_SUSFS_ENABLE_LOG \
-            --enable KSU_SUSFS_HIDE_KSU_SUSFS_SYMBOLS \
-            --enable KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG \
-            --enable KSU_SUSFS_OPEN_REDIRECT \
-            --enable KSU_SUSFS_SUS_MAP \
             --enable KALLSYMS \
             --enable KALLSYMS_ALL \
             --enable BPF_STREAM_PARSER \
@@ -230,50 +200,27 @@ jobs:
           echo "=== olddefconfig ==="
           make $MAKE_ARGS olddefconfig
 
-          # KVM模式: 用 scripts/config 强制再开一遍(defconfig注入可能被 olddefconfig 依赖裁掉)
-          if [ "${{ github.event.inputs.ENABLE_KVM }}" = "true" ]; then
-            echo "=== force-enable KVM via scripts/config ==="
-            ./scripts/config --file "$OUT/.config" \
-              --enable VIRTUALIZATION \
-              --enable KVM \
-              --enable VHOST \
-              --enable VHOST_NET \
-              --enable VHOST_VSOCK \
-              --enable VSOCKETS \
-              --enable VIRTIO_VSOCKETS
-            make $MAKE_ARGS olddefconfig
-            echo "=== verify KVM configs took effect ==="
-            for opt in VIRTUALIZATION KVM HAVE_KVM ARM64_VHE VHOST VHOST_NET; do
-              if grep -q "^CONFIG_${opt}=[ym]" "$OUT/.config"; then
-                echo "  OK  $(grep "^CONFIG_${opt}=" "$OUT/.config")"
-              else
-                echo "  !!  CONFIG_${opt} NOT enabled"
-              fi
-            done
+          echo "=== verify docker configs took effect in .config ==="
+          MISSING=""
+          for opt in PID_NS USER_NS IPC_NS POSIX_MQUEUE \
+                     CGROUP_DEVICE CGROUP_PIDS \
+                     BRIDGE_NETFILTER VLAN_8021Q \
+                     NETFILTER_XT_MATCH_ADDRTYPE CHECKPOINT_RESTORE; do
+            if grep -q "^CONFIG_${opt}=y" "$OUT/.config"; then
+              echo "  OK  CONFIG_${opt}=y"
+            elif grep -q "^CONFIG_${opt}=m" "$OUT/.config"; then
+              echo "  OK  CONFIG_${opt}=m (module)"
+            else
+              echo "  !!  CONFIG_${opt} NOT enabled"
+              MISSING="$MISSING $opt"
+            fi
+          done
+          if [ -n "$MISSING" ]; then
+            echo "WARN: 这些docker配置没生效(可能缺依赖):$MISSING"
           fi
 
-          # Docker模式: 校验那几项是否真的生效(没生效就早停,别白等编译)
-          if [ "${{ github.event.inputs.ENABLE_DOCKER }}" = "true" ]; then
-            echo "=== verify docker configs took effect in .config ==="
-            MISSING=""
-            for opt in PID_NS USER_NS IPC_NS POSIX_MQUEUE \
-                       CGROUP_DEVICE CGROUP_PIDS \
-                       BRIDGE_NETFILTER VLAN_8021Q \
-                       NETFILTER_XT_MATCH_ADDRTYPE CHECKPOINT_RESTORE; do
-              if grep -q "^CONFIG_${opt}=y" "$OUT/.config"; then
-                echo "  OK  CONFIG_${opt}=y"
-              elif grep -q "^CONFIG_${opt}=m" "$OUT/.config"; then
-                echo "  OK  CONFIG_${opt}=m (module)"
-              else
-                echo "  !!  CONFIG_${opt} NOT enabled"
-                MISSING="$MISSING $opt"
-              fi
-            done
-            if [ -n "$MISSING" ]; then
-              echo "ERROR: 这些docker配置没生效(可能缺依赖):$MISSING"
-              echo "继续编译但这些功能会缺失。检查依赖关系。"
-            fi
-          fi
+          echo "=== verify KSU enabled ==="
+          grep -E '^CONFIG_KSU=' "$OUT/.config" || echo "  !! CONFIG_KSU not set"
 
           echo "=== build Image Image.gz dtbs ==="
           make -j"$(nproc)" $MAKE_ARGS Image Image.gz dtbs
@@ -298,5 +245,5 @@ jobs:
       - name: Upload kernel artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: venus-dsl-kernel-${{ github.event.inputs.ENABLE_DOCKER == 'true' && 'docker' || 'plain' }}${{ github.event.inputs.ENABLE_KVM == 'true' && '-kvm' || '' }}
+          name: venus-XiaoYang-docker-sukisu-ultra
           path: artifacts/*
