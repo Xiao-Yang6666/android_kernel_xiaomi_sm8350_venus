@@ -118,18 +118,25 @@ jobs:
           set -e
           cd android-kernel
           DEFCONFIG=arch/arm64/configs/venus_defconfig
-          echo "=== injecting Docker-required configs (最小集) ==="
+          echo "=== injecting Docker/LXC-required configs ==="
           for opt in PID_NS USER_NS IPC_NS POSIX_MQUEUE \
                      CGROUP_DEVICE CGROUP_PIDS \
                      BRIDGE_NETFILTER VLAN_8021Q \
                      NETFILTER_XT_MATCH_ADDRTYPE \
-                     CHECKPOINT_RESTORE; do
+                     CHECKPOINT_RESTORE \
+                     NETFILTER_XT_TARGET_CHECKSUM \
+                     CFS_BANDWIDTH \
+                     CGROUP_HUGETLB \
+                     NET_CLS_CGROUP CGROUP_NET_PRIO CGROUP_NET_CLASSID \
+                     CGROUP_PERF \
+                     MACVLAN IPVLAN VXLAN \
+                     DUMMY VETH BRIDGE; do
             sed -i "/^# CONFIG_${opt} is not set/d" "$DEFCONFIG"
             sed -i "/^CONFIG_${opt}=/d" "$DEFCONFIG"
             echo "CONFIG_${opt}=y" >> "$DEFCONFIG"
           done
-          echo "=== docker-related lines now ==="
-          grep -E 'PID_NS|USER_NS|IPC_NS|CGROUP_DEVICE|CGROUP_PIDS|BRIDGE_NETFILTER|VLAN_8021Q|ADDRTYPE|POSIX_MQUEUE|CHECKPOINT' "$DEFCONFIG" || true
+          echo "=== docker/lxc-related lines now ==="
+          grep -E 'PID_NS|USER_NS|IPC_NS|CGROUP_DEVICE|CGROUP_PIDS|BRIDGE_NETFILTER|VLAN_8021Q|ADDRTYPE|POSIX_MQUEUE|CHECKPOINT|XT_TARGET_CHECKSUM|CFS_BANDWIDTH|HUGETLB|NET_CLS_CGROUP|NET_PRIO|NET_CLASSID|CGROUP_PERF|MACVLAN|IPVLAN|VXLAN|DUMMY|VETH|BRIDGE' "$DEFCONFIG" || true
 
       - name: Build kernel (replicate build_venus.sh)
         run: |
@@ -199,12 +206,15 @@ jobs:
           echo "=== olddefconfig ==="
           make $MAKE_ARGS olddefconfig
 
-          echo "=== verify docker configs took effect in .config ==="
+          echo "=== verify docker/lxc configs took effect in .config ==="
           MISSING=""
           for opt in PID_NS USER_NS IPC_NS POSIX_MQUEUE \
                      CGROUP_DEVICE CGROUP_PIDS \
                      BRIDGE_NETFILTER VLAN_8021Q \
-                     NETFILTER_XT_MATCH_ADDRTYPE CHECKPOINT_RESTORE; do
+                     NETFILTER_XT_MATCH_ADDRTYPE CHECKPOINT_RESTORE \
+                     NETFILTER_XT_TARGET_CHECKSUM CFS_BANDWIDTH \
+                     NET_CLS_CGROUP CGROUP_NET_PRIO CGROUP_NET_CLASSID \
+                     CGROUP_PERF MACVLAN IPVLAN VXLAN VETH BRIDGE; do
             if grep -q "^CONFIG_${opt}=y" "$OUT/.config"; then
               echo "  OK  CONFIG_${opt}=y"
             elif grep -q "^CONFIG_${opt}=m" "$OUT/.config"; then
